@@ -126,8 +126,12 @@ class TestBaseSolver(TestCase):
         # Simple system: a single algebraic equation
         class ScalarModel:
             def __init__(self):
-                self.y0 = np.array([2])
+                self.y0_list = [np.array([2])]
                 self.rhs = {}
+                self.len_rhs = 0
+                self.len_rhs_sens = 0
+                self.len_alg = 1
+                self.len_alg_sens = 0
                 self.jac_algebraic_eval = None
                 t = casadi.MX.sym("t")
                 y = casadi.MX.sym("y")
@@ -139,6 +143,7 @@ class TestBaseSolver(TestCase):
                 self.bounds = (np.array([-np.inf]), np.array([np.inf]))
                 self.len_rhs_and_alg = 1
                 self.events = []
+                self.batch_size = 1
 
             def rhs_eval(self, t, y, inputs):
                 return np.array([])
@@ -161,7 +166,7 @@ class TestBaseSolver(TestCase):
 
         class VectorModel:
             def __init__(self):
-                self.y0 = np.zeros_like(vec)
+                self.y0_list = [np.zeros_like(vec)]
                 self.rhs = {"test": "test"}
                 self.concatenated_rhs = np.array([1])
                 self.jac_algebraic_eval = None
@@ -174,8 +179,12 @@ class TestBaseSolver(TestCase):
                 self.convert_to_format = "casadi"
                 self.bounds = (-np.inf * np.ones(4), np.inf * np.ones(4))
                 self.len_rhs = 1
-                self.len_rhs_and_alg = 4
+                self.len_rhs_sens = 0
+                self.len_alg = len(vec) - 1
+                self.len_alg_sens = 0
+
                 self.events = []
+                self.batch_size = 1
 
             def rhs_eval(self, t, y, inputs):
                 return y[0:1]
@@ -184,10 +193,10 @@ class TestBaseSolver(TestCase):
                 return (y[1:] - vec[1:]) ** 2
 
         model = VectorModel()
-        init_cond = solver.calculate_consistent_state(model)
+        [init_cond] = solver.calculate_consistent_state(model)
         np.testing.assert_array_almost_equal(init_cond.flatten(), vec)
         # with casadi
-        init_cond = solver_with_casadi.calculate_consistent_state(model)
+        [init_cond] = solver_with_casadi.calculate_consistent_state(model)
         np.testing.assert_array_almost_equal(init_cond.full().flatten(), vec)
 
         # With Jacobian
@@ -195,7 +204,7 @@ class TestBaseSolver(TestCase):
             return 2 * np.hstack([np.zeros((3, 1)), np.diag(y[1:] - vec[1:])])
 
         model.jac_algebraic_eval = jac_dense
-        init_cond = solver.calculate_consistent_state(model)
+        [init_cond] = solver.calculate_consistent_state(model)
         np.testing.assert_array_almost_equal(init_cond.flatten(), vec)
 
         # With sparse Jacobian
@@ -205,13 +214,13 @@ class TestBaseSolver(TestCase):
             )
 
         model.jac_algebraic_eval = jac_sparse
-        init_cond = solver.calculate_consistent_state(model)
+        [init_cond] = solver.calculate_consistent_state(model)
         np.testing.assert_array_almost_equal(init_cond.flatten(), vec)
 
     def test_fail_consistent_initial_conditions(self):
         class Model:
             def __init__(self):
-                self.y0 = np.array([2])
+                self.y0_list = [np.array([2])]
                 self.rhs = {}
                 self.jac_algebraic_eval = None
                 t = casadi.MX.sym("t")
@@ -220,8 +229,13 @@ class TestBaseSolver(TestCase):
                 self.casadi_algebraic = casadi.Function(
                     "alg", [t, y, p], [self.algebraic_eval(t, y, p)]
                 )
+                self.len_rhs = 0
+                self.len_rhs_sens = 0
+                self.len_alg = 1
+                self.len_alg_sens = 0
                 self.convert_to_format = "casadi"
                 self.bounds = (np.array([-np.inf]), np.array([np.inf]))
+                self.batch_size = 1
 
             def rhs_eval(self, t, y, inputs):
                 return np.array([])
@@ -386,19 +400,16 @@ class TestBaseSolver(TestCase):
                             inputs = {"a": a_value, "b": b_value}
                             all_inputs.append((t, y, inputs))
             for t, y, inputs in all_inputs:
-                if model.convert_to_format == "casadi":
-                    use_inputs = casadi.vertcat(*[x for x in inputs.values()])
-                else:
-                    use_inputs = inputs
-
+                use_inputs = pybamm.BaseSolver._inputs_to_stacked_vect(
+                    [inputs], convert_to_format
+                )
                 sens = model.jacp_rhs_algebraic_eval(t, y, use_inputs)
-
-                if convert_to_format == "casadi":
-                    sens_a = sens[0]
-                    sens_b = sens[1]
-                else:
-                    sens_a = sens["a"]
-                    sens_b = sens["b"]
+                self.assertEqual(sens.shape, (2, 2))
+                sens_a = sens[:, 0]
+                sens_b = sens[:, 1]
+                if convert_to_format != "casadi":
+                    sens_a = sens_a.reshape(-1, 1)
+                    sens_b = sens_b.reshape(-1, 1)
 
                 np.testing.assert_allclose(
                     sens_a, exact_diff_a(y, inputs["a"], inputs["b"])

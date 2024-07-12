@@ -47,28 +47,11 @@ class AlgebraicSolver(pybamm.BaseSolver):
     def tol(self, value):
         self._tol = value
 
-    def _integrate(self, model, t_eval, inputs_dict=None):
-        """
-        Calculate the solution of the algebraic equations through root-finding
-
-        Parameters
-        ----------
-        model : :class:`pybamm.BaseModel`
-            The model whose solution to calculate.
-        t_eval : :class:`numpy.array`, size (k,)
-            The times at which to compute the solution
-        inputs_dict : dict, optional
-            Any input parameters to pass to the model when solving
-        """
-        inputs_dict = inputs_dict or {}
-        if model.convert_to_format == "casadi":
-            inputs = casadi.vertcat(*[x for x in inputs_dict.values()])
-        else:
-            inputs = inputs_dict
-
-        y0 = model.y0
+    def _integrate_batch(self, model, t_eval, y0, y0S, inputs_list, inputs):
         if isinstance(y0, casadi.DM):
             y0 = y0.full()
+        if isinstance(inputs, casadi.DM):
+            inputs = inputs.full()
         y0 = y0.flatten()
 
         # The casadi algebraic solver can read rhs equations, but leaves them unchanged
@@ -148,7 +131,7 @@ class AlgebraicSolver(pybamm.BaseSolver):
                     if jac_fn is None:
                         jac_fn = "2-point"
                     timer.reset()
-                    sol = optimize.least_squares(
+                    solns = optimize.least_squares(
                         root_fun,
                         y0_alg,
                         method=method,
@@ -185,7 +168,7 @@ class AlgebraicSolver(pybamm.BaseSolver):
                         ]
                         extra_options["bounds"] = bounds
                     timer.reset()
-                    sol = optimize.minimize(
+                    solns = optimize.minimize(
                         root_norm,
                         y0_alg,
                         method=method,
@@ -196,7 +179,7 @@ class AlgebraicSolver(pybamm.BaseSolver):
                     integration_time += timer.time()
                 else:
                     timer.reset()
-                    sol = optimize.root(
+                    solns = optimize.root(
                         root_fun,
                         y0_alg,
                         method=self.method,
@@ -206,23 +189,23 @@ class AlgebraicSolver(pybamm.BaseSolver):
                     )
                     integration_time += timer.time()
 
-                if sol.success and np.all(abs(sol.fun) < self.tol):
+                if solns.success and np.all(abs(solns.fun) < self.tol):
                     # update initial guess for the next iteration
-                    y0_alg = sol.x
+                    y0_alg = solns.x
                     # update solution array
                     y_alg[:, idx] = y0_alg
                     success = True
-                elif not sol.success:
+                elif not solns.success:
                     raise pybamm.SolverError(
-                        f"Could not find acceptable solution: {sol.message}"
+                        f"Could not find acceptable solution: {solns.message}"
                     )
                 else:
-                    y0_alg = sol.x
+                    y0_alg = solns.x
                     if itr > maxiter:
                         raise pybamm.SolverError(
                             "Could not find acceptable solution: solver terminated "
                             "successfully, but maximum solution error "
-                            f"({np.max(abs(sol.fun))}) above tolerance ({self.tol})"
+                            f"({np.max(abs(solns.fun))}) above tolerance ({self.tol})"
                         )
                 itr += 1
 
@@ -230,8 +213,9 @@ class AlgebraicSolver(pybamm.BaseSolver):
         y_diff = np.r_[[y0_diff] * len(t_eval)].T
         y_sol = np.r_[y_diff, y_alg]
         # Return solution object (no events, so pass None to t_event, y_event)
-        sol = pybamm.Solution(
-            t_eval, y_sol, model, inputs_dict, termination="final time"
+        solns = pybamm.Solution.from_concatenated_state(
+            t_eval, y_sol, model, inputs_list, termination="final time"
         )
-        sol.integration_time = integration_time
-        return sol
+        for s in solns:
+            s.integration_time = integration_time
+        return solns

@@ -139,6 +139,7 @@ def find_symbols(
     symbol: pybamm.Symbol,
     constant_symbols: OrderedDict,
     variable_symbols: OrderedDict,
+    input_slices: dict[str, int | slice],
     output_jax=False,
 ):
     """
@@ -166,6 +167,9 @@ def find_symbols(
     variable_symbol: collections.OrderedDict
         The output dictionary of variable (with y or t) symbol ids to lines of code
 
+    input_slices: dict of (str, int or slice)
+        A dict mapping the name of an input to a slice of the input vector
+
     output_jax: bool
         If True, only numpy and jax operations will be used in the generated code,
         raises NotImplNotImplementedError if any SparseStack or Mat-Mat multiply
@@ -187,7 +191,9 @@ def find_symbols(
 
     # process children recursively
     for child in symbol.children:
-        find_symbols(child, constant_symbols, variable_symbols, output_jax)
+        find_symbols(
+            child, constant_symbols, variable_symbols, input_slices, output_jax
+        )
 
     # calculate the variable names that will hold the result of calculating the
     # children variables
@@ -280,6 +286,8 @@ def find_symbols(
         # Index has a different syntax than other univariate operations
         if isinstance(symbol, pybamm.Index):
             symbol_str = f"{children_vars[0]}[{symbol.slice.start}:{symbol.slice.stop}]"
+        elif isinstance(symbol, pybamm.AbsoluteValue):
+            symbol_str = f"{symbol.name}({children_vars[0]})"
         else:
             symbol_str = symbol.name + children_vars[0]
 
@@ -358,8 +366,8 @@ def find_symbols(
         symbol_str = "t"
 
     elif isinstance(symbol, pybamm.InputParameter):
-        symbol_str = f'inputs["{symbol.name}"]'
-
+        input_slice = input_slices[symbol.name]
+        symbol_str = f"inputs[{input_slice}]"
     else:
         raise NotImplementedError(
             f"Conversion to python not implemented for a symbol of type '{type(symbol)}'"
@@ -369,7 +377,10 @@ def find_symbols(
 
 
 def to_python(
-    symbol: pybamm.Symbol, debug=False, output_jax=False
+    symbol: pybamm.Symbol,
+    inputs: list[dict] | None = None,
+    debug=False,
+    output_jax=False,
 ) -> tuple[OrderedDict, str]:
     """
     This function converts an expression tree into a dict of constant input values, and
@@ -379,6 +390,9 @@ def to_python(
     ----------
     symbol : :class:`pybamm.Symbol`
         The symbol to convert to python code
+
+    inputs: list of dict (optional)
+        The inputs to the expression tree
 
     debug : bool
         If set to True, the function also emits debug code
@@ -396,9 +410,12 @@ def to_python(
         operations are used
 
     """
+    if inputs is None:
+        inputs = [{}]
     constant_values: OrderedDict = OrderedDict()
     variable_symbols: OrderedDict = OrderedDict()
-    find_symbols(symbol, constant_values, variable_symbols, output_jax)
+    input_slices = pybamm.BaseSolver._input_dict_to_slices(inputs[0])
+    find_symbols(symbol, constant_values, variable_symbols, input_slices, output_jax)
 
     line_format = "{} = {}"
 
@@ -409,6 +426,9 @@ def to_python(
             + "; print(type({0}),np.shape({0}))".format(
                 id_to_python_variable(symbol_id, False)
             )
+            # + "; jax.debug.print(\"{0} = {{x}}\", x={0}.flatten())".format(
+            #    id_to_python_variable(symbol_id, False)
+            # )
             for symbol_id, symbol_line in variable_symbols.items()
         ]
     else:
@@ -430,12 +450,25 @@ class EvaluatorPython:
 
     symbol : :class:`pybamm.Symbol`
         The symbol to convert to python code
-
+    inputs: list of dict (optional)
+        The inputs to the expression tree
+    is_event: bool
+        Indicates this symbol is an event expression
+    is_matrix: bool
+        Indicates the evaluation of this symbol results in a matrix (otherwise result is a vector)
 
     """
 
-    def __init__(self, symbol: pybamm.Symbol):
-        constants, python_str = pybamm.to_python(symbol, debug=False)
+    def __init__(
+        self,
+        symbol: pybamm.Symbol,
+        inputs: list[dict] | None = None,
+        is_event: bool = False,
+        is_matrix: bool = False,
+    ):
+        if inputs is None:
+            inputs = [{}]
+        constants, python_str = pybamm.to_python(symbol, inputs, debug=False)
 
         # extract constants in generated function
         for i, symbol_id in enumerate(constants.keys()):
@@ -472,20 +505,53 @@ class EvaluatorPython:
         self._python_str = python_str
         self._result_var = result_var
         self._symbol = symbol
+        self._is_event = is_event
+        self._is_matrix = is_matrix
 
         # compile and run the generated python code,
         compiled_function = compile(python_str, result_var, "exec")
         exec(compiled_function)
 
+        self._ninputs = len(inputs)
+
     def __call__(self, t=None, y=None, inputs=None):
         """
         evaluate function
         """
-        # generated code assumes y is a column vector
+        # generated code assumes y and inputs are column vectors
         if y is not None and y.ndim == 1:
             y = y.reshape(-1, 1)
+            inputs = inputs.reshape(-1, 1)
 
-        result = self._evaluate(self._constants, t, y, inputs)
+        if self._ninputs == 1:
+            # nothing to do for a single input
+            result = self._evaluate(self._constants, t, y, inputs)
+        else:
+            nstates = y.shape[0] // self._ninputs
+            nparams = len(inputs) // self._ninputs
+
+            results = [
+                self._evaluate(
+                    self._constants,
+                    t,
+                    y[i * nstates : (i + 1) * nstates],
+                    inputs[i * nparams : (i + 1) * nparams],
+                )
+                for i in range(self._ninputs)
+            ]
+
+            if self._is_event:
+                # if an event do a soft max on the results to combine events from multiple
+                # inputs
+                margin = 1e-4
+                alpha = np.log(len(inputs)) / margin
+                result = scipy.special.logsumexp(alpha * results) / alpha
+            elif self._is_matrix:
+                # if a matrix output, concatenate the results in a block diagonal matrix
+                result = scipy.sparse.block_diag(results, format="csr")
+            else:
+                # otherwise concatenate the results in a column vector
+                result = np.vstack(results)
 
         return result
 
@@ -522,17 +588,29 @@ class EvaluatorJax:
 
     symbol : :class:`pybamm.Symbol`
         The symbol to convert to python code
-
+    inputs: list of dict (optional)
+        The inputs to the model
+    is_event: bool (optional)
+        Indicates this symbol is an event expression
 
     """
 
-    def __init__(self, symbol: pybamm.Symbol):
+    def __init__(
+        self,
+        symbol: pybamm.Symbol,
+        inputs: list[dict] | None = None,
+        is_event: bool = False,
+    ):
         if not pybamm.have_jax():  # pragma: no cover
             raise ModuleNotFoundError(
                 "Jax or jaxlib is not installed, please see https://docs.pybamm.org/en/latest/source/user_guide/installation/gnu-linux-mac.html#optional-jaxsolver"
             )
+        if inputs is None:
+            inputs = [{}]
 
-        constants, python_str = pybamm.to_python(symbol, debug=False, output_jax=True)
+        constants, python_str = pybamm.to_python(
+            symbol, inputs, debug=False, output_jax=True
+        )
 
         # replace numpy function calls to jax numpy calls
         python_str = python_str.replace("np.", "jax.numpy.")
@@ -590,17 +668,68 @@ class EvaluatorJax:
         compiled_function = compile(python_str, result_var, "exec")
         exec(compiled_function)
 
+        # use vmap to vectorize the function over the inputs if ninputs > 1
+        in_axes = ([None] * len(self._arg_list)) + [None, 0, 0]
+        out_axes = 0
+        ninputs = len(inputs)
+        if ninputs > 1:
+            if is_event:
+
+                def mapped_evaluate_jax_event(*args):
+                    # change inputs and y to a 2d array for vmap (inputs is the last arg)
+                    args = (
+                        *args[:-2],
+                        args[-2].reshape(ninputs, -1),
+                        args[-1].reshape(ninputs, -1),
+                    )
+
+                    # exectute the mapped function
+                    results = jax.vmap(
+                        self._evaluate_jax, in_axes=in_axes, out_axes=out_axes
+                    )(*args)
+
+                    # if an event do a soft max on the results to combine events from multiple inputs
+                    margin = 1e-4
+                    alpha = jax.numpy.log(ninputs) / margin
+                    return jax.scipy.special.logsumexp(alpha * results) / alpha
+
+                self._mapped_evaluate_jax = mapped_evaluate_jax_event
+
+            else:
+
+                def mapped_evaluate_jax(*args):
+                    # change inputs and y to a 2d array for vmap (inputs is the last arg)
+                    args = (
+                        *args[:-2],
+                        args[-2].reshape(ninputs, -1),
+                        args[-1].reshape(ninputs, -1),
+                    )
+
+                    # exectute the mapped function
+                    results = jax.vmap(
+                        self._evaluate_jax, in_axes=in_axes, out_axes=out_axes
+                    )(*args)
+
+                    # reshape to a column vector
+                    return results.reshape(-1, 1)
+
+                self._mapped_evaluate_jax = mapped_evaluate_jax
+        else:
+            self._mapped_evaluate_jax = self._evaluate_jax
+
         self._static_argnums = tuple(static_argnums)
         self._jit_evaluate = jax.jit(
-            self._evaluate_jax,  # type:ignore[attr-defined]
+            self._mapped_evaluate_jax,  # type:ignore[attr-defined]
             static_argnums=self._static_argnums,
         )
 
     def get_jacobian(self):
-        n = len(self._arg_list)
-
         # forward mode autodiff  wrt y, which is argument 1 after arg_list
-        jacobian_evaluate = jax.jacfwd(self._evaluate_jax, argnums=1 + n)
+        n = len(self._arg_list)
+        return self._get_jacfwd(1 + n)
+
+    def _get_jacfwd(self, argnum):
+        jacobian_evaluate = jax.jacfwd(self._mapped_evaluate_jax, argnums=argnum)
 
         self._jac_evaluate = jax.jit(
             jacobian_evaluate, static_argnums=self._static_argnums
@@ -612,16 +741,9 @@ class EvaluatorJax:
         return self.jvp
 
     def get_sensitivities(self):
+        # forward mode autodiff  wrt y, which is argument 2 after arg_list
         n = len(self._arg_list)
-
-        # forward mode autodiff wrt inputs, which is argument 2 after arg_list
-        jacobian_evaluate = jax.jacfwd(self._evaluate_jax, argnums=2 + n)
-
-        self._sens_evaluate = jax.jit(
-            jacobian_evaluate, static_argnums=self._static_argnums
-        )
-
-        return EvaluatorJaxSensitivities(self._sens_evaluate, self._constants)
+        return self._get_jacfwd(2 + n)
 
     def debug(self, t=None, y=None, inputs=None):
         # generated code assumes y is a column vector
@@ -629,7 +751,9 @@ class EvaluatorJax:
             y = y.reshape(-1, 1)
 
         # execute code
-        jaxpr = jax.make_jaxpr(self._evaluate_jax)(*self._constants, t, y, inputs).jaxpr
+        jaxpr = jax.make_jaxpr(self._mapped_evaluate_jax)(
+            *self._constants, t, y, inputs
+        ).jaxpr
         print("invars:", jaxpr.invars)
         print("outvars:", jaxpr.outvars)
         print("constvars:", jaxpr.constvars)
@@ -683,27 +807,5 @@ class EvaluatorJaxJacobian:
         # execute code
         result = self._jac_evaluate(*self._constants, t, y, inputs)
         result = result.reshape(result.shape[0], -1)
-
-        return result
-
-
-class EvaluatorJaxSensitivities:
-    def __init__(self, jac_evaluate, constants):
-        self._jac_evaluate = jac_evaluate
-        self._constants = constants
-
-    def __call__(self, t=None, y=None, inputs=None):
-        """
-        evaluate function
-        """
-        # generated code assumes y is a column vector
-        if y is not None and y.ndim == 1:
-            y = y.reshape(-1, 1)
-
-        # execute code
-        result = self._jac_evaluate(*self._constants, t, y, inputs)
-        result = {
-            key: value.reshape(value.shape[0], -1) for key, value in result.items()
-        }
 
         return result

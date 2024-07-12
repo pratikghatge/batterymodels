@@ -2,9 +2,10 @@
 # Solver class using Scipy's adaptive time stepper
 #
 import numpy as onp
-import asyncio
 
 import pybamm
+import asyncio
+import copy
 
 if pybamm.have_jax():
     import jax
@@ -43,7 +44,7 @@ class JaxSolver(pybamm.BaseSolver):
         The absolute tolerance for the solver (default is 1e-6).
     extrap_tol : float, optional
         The tolerance to assert whether extrapolation occurs or not (default is 0).
-    extra_options : dict, optional
+    options : dict, optional
         Any options to pass to the solver.
         Please consult `JAX documentation
         <https://github.com/google/jax/blob/master/jax/experimental/ode.py>`_
@@ -57,7 +58,7 @@ class JaxSolver(pybamm.BaseSolver):
         rtol=1e-6,
         atol=1e-6,
         extrap_tol=None,
-        extra_options=None,
+        options=None,
     ):
         if not pybamm.have_jax():
             raise ModuleNotFoundError(
@@ -67,15 +68,25 @@ class JaxSolver(pybamm.BaseSolver):
         # note: bdf solver itself calculates consistent initial conditions so can set
         # root_method to none, allow user to override this behavior
         super().__init__(
-            method, rtol, atol, root_method=root_method, extrap_tol=extrap_tol
+            method,
+            rtol,
+            atol,
+            root_method=root_method,
+            extrap_tol=extrap_tol,
+            options=options,
         )
+
         method_options = ["RK45", "BDF"]
         if method not in method_options:
             raise ValueError(f"method must be one of {method_options}")
         self.ode_solver = False
         if method == "RK45":
             self.ode_solver = True
-        self.extra_options = extra_options or {}
+        options = options or {}
+        self.options = copy.copy(options) or {}
+        # remove "num_threads" from options as it is not supported
+        if "num_threads" in self.options:
+            self.options.pop("num_threads", None)
         self.name = f"JAX solver ({method})"
         self._cached_solves = dict()
         pybamm.citations.register("jax2018")
@@ -143,8 +154,6 @@ class JaxSolver(pybamm.BaseSolver):
                 " end-time"
             )
 
-        # Initial conditions, make sure they are an 0D array
-        y0 = jnp.array(model.y0).reshape(-1)
         mass = None
         if self.method == "BDF":
             mass = model.mass_matrix.entries.toarray()
@@ -157,28 +166,44 @@ class JaxSolver(pybamm.BaseSolver):
                 [model.rhs_eval(t, y, inputs), model.algebraic_eval(t, y, inputs)]
             )
 
-        def solve_model_rk45(inputs):
+        def stack_inputs(inputs: dict | list[dict]):
+            if isinstance(inputs, dict):
+                return jnp.array([x.reshape(-1, 1) for x in inputs.values()])
+            if len(inputs) == 1:
+                return jnp.array([x.reshape(-1, 1) for x in inputs[0].values()])
+            arrays_to_stack = [
+                jnp.array(x).reshape(-1, 1)
+                for inputs in inputs
+                for x in inputs.values()
+            ]
+            return jnp.vstack(arrays_to_stack)
+
+        def solve_model_rk45(y0, inputs: dict | list[dict]):
+            # Initial conditions, make sure they are an 0D array
+            y0 = jnp.array(y0).reshape(-1)
             y = odeint(
                 rhs_ode,
                 y0,
                 t_eval,
-                inputs,
+                stack_inputs(inputs),
                 rtol=self.rtol,
                 atol=self.atol,
-                **self.extra_options,
+                **self.options,
             )
             return jnp.transpose(y)
 
-        def solve_model_bdf(inputs):
+        def solve_model_bdf(y0, inputs: dict | list[dict]):
+            # Initial conditions, make sure they are an 0D array
+            y0 = jnp.array(y0).reshape(-1)
             y = pybamm.jax_bdf_integrate(
                 rhs_dae,
                 y0,
                 t_eval,
-                inputs,
+                stack_inputs(inputs),
                 rtol=self.rtol,
                 atol=self.atol,
                 mass=mass,
-                **self.extra_options,
+                **self.options,
             )
             return jnp.transpose(y)
 
@@ -187,7 +212,10 @@ class JaxSolver(pybamm.BaseSolver):
         else:
             return jax.jit(solve_model_bdf)
 
-    def _integrate(self, model, t_eval, inputs=None):
+    def _integrate_batch(self, model, t_eval, y0, y0S, inputs_list, inputs):
+        raise NotImplementedError()
+
+    def _integrate(self, model, t_eval, inputs_list=None, batched_inputs=None):
         """
         Solve a model defined by dydt with initial conditions y0.
 
@@ -197,8 +225,9 @@ class JaxSolver(pybamm.BaseSolver):
             The model whose solution to calculate.
         t_eval : :class:`numpy.array`, size (k,)
             The times at which to compute the solution
-        inputs : dict, list[dict], optional
+        inputs_list : list[dict], optional
             Any input parameters to pass to the model when solving
+        batched_inputs : list of ndarray, optional
 
         Returns
         -------
@@ -207,23 +236,31 @@ class JaxSolver(pybamm.BaseSolver):
             various diagnostic messages.
 
         """
-        if isinstance(inputs, dict):
-            inputs = [inputs]
+        inputs_list = inputs_list or [{}]
+
         timer = pybamm.Timer()
         if model not in self._cached_solves:
             self._cached_solves[model] = self.create_solve(model, t_eval)
 
-        y = []
+        batch_size = len(inputs_list) // len(batched_inputs)
+        nbatches = len(batched_inputs)
+
         platform = jax.lib.xla_bridge.get_backend().platform.casefold()
-        if len(inputs) <= 1 or platform.startswith("cpu"):
+        if nbatches == 1:
+            y = [self._cached_solves[model](model.y0_list[0], inputs_list)]
+        elif platform.startswith("cpu"):
             # cpu execution runs faster when multithreaded
             async def solve_model_for_inputs():
-                async def solve_model_async(inputs_v):
-                    return self._cached_solves[model](inputs_v)
+                async def solve_model_async(y0, inputs_sublist):
+                    return self._cached_solves[model](y0, inputs_sublist)
 
                 coro = []
-                for inputs_v in inputs:
-                    coro.append(asyncio.create_task(solve_model_async(inputs_v)))
+                for i in range(nbatches):
+                    y0 = model.y0_list[i]
+                    inputs_sublist = inputs_list[i * batch_size : (i + 1) * batch_size]
+                    coro.append(
+                        asyncio.create_task(solve_model_async(y0, inputs_sublist))
+                    )
                 return await asyncio.gather(*coro)
 
             y = asyncio.run(solve_model_for_inputs())
@@ -238,17 +275,21 @@ class JaxSolver(pybamm.BaseSolver):
 
             # convert inputs (array of dict) to a dict of arrays for vmap
             inputs_v = {
-                key: jnp.array([dic[key] for dic in inputs]) for key in inputs[0]
+                key: jnp.array([dic[key] for dic in inputs_list])
+                for key in inputs_list[0]
             }
-            y.extend(jax.vmap(self._cached_solves[model])(inputs_v))
+            y0 = onp.vstack([model.y0_list[i].flatten() for i in range(nbatches)])
+            y.extend(jax.vmap(self._cached_solves[model])(y0, inputs_v))
         else:
             # Unknown platform, use serial execution as fallback
             print(
                 f'Unknown platform requested: "{platform}", '
                 "falling back to serial execution"
             )
-            for inputs_v in inputs:
-                y.append(self._cached_solves[model](inputs_v))
+
+            y = []
+            for y0, inputs_v in zip(model.y0_list, inputs_list):
+                y.append(self._cached_solves[model](y0, inputs_v))
 
         # This code block implements single-program multiple-data execution
         # using pmap across multiple XLAs. It is currently commented out
@@ -278,11 +319,7 @@ class JaxSolver(pybamm.BaseSolver):
         #         inputs_v = {key: jnp.array([dic[key] for dic in inputs_list])
         #                     for key in inputs_list[0]}
         #         y.extend(jax.pmap(self._cached_solves[model])(inputs_v))
-
         integration_time = timer.time()
-
-        # convert to a normal numpy array
-        y = onp.array(y)
 
         termination = "final time"
         t_event = None
@@ -290,19 +327,14 @@ class JaxSolver(pybamm.BaseSolver):
 
         # Extract solutions from y with their associated input dicts
         solutions = []
-        for k, inputs_dict in enumerate(inputs):
-            sol = pybamm.Solution(
-                t_eval,
-                jnp.reshape(y[k,], y.shape[1:]),
-                model,
-                inputs_dict,
-                t_event,
-                y_event,
-                termination,
+        for i in range(nbatches):
+            state_vec = onp.array(y[i])
+            inputs = inputs_list[i * batch_size : (i + 1) * batch_size]
+            solution_batch = pybamm.Solution.from_concatenated_state(
+                t_eval, state_vec, model, inputs, t_event, y_event, termination
             )
-            sol.integration_time = integration_time
-            solutions.append(sol)
+            for soln in solution_batch:
+                soln.integration_time = integration_time
+            solutions += solution_batch
 
-        if len(solutions) == 1:
-            return solutions[0]
         return solutions

@@ -138,6 +138,149 @@ class Solution:
         # Solution now uses CasADi
         pybamm.citations.register("Andersson2019")
 
+    def split(self, rhs_len, alg_len, inputs_list, is_casadi_solver=False):
+        """
+        split up the concatenated solution into a list of solutions for each input
+        the state vector is assumed to have the form:
+        [rhs0p0, rhs1p0, ..., rhs0p1, rhs1p1, ..., alg0p0, alg1p0, ..., alg0p1, alg1p1, ...]
+        """
+        if not isinstance(self, Solution):
+            raise TypeError("split can only be called on a Solution object")
+
+        ninputs = len(inputs_list)
+        if ninputs == 1:
+            return [self]
+
+        if is_casadi_solver:
+            all_ys_split = [
+                [
+                    casadi.vertcat(
+                        self.all_ys[i][(p * rhs_len) : (p * rhs_len + rhs_len), :],
+                        self.all_ys[i][
+                            (p * alg_len + ninputs * rhs_len) : (
+                                p * alg_len + ninputs * rhs_len + alg_len
+                            ),
+                            :,
+                        ],
+                    )
+                    for i in range(len(self.all_ys))
+                ]
+                for p in range(ninputs)
+            ]
+            if self.y_event is not None:
+                y_events = [
+                    casadi.vertcat(
+                        self.y_event[(p * rhs_len) : (p * rhs_len + rhs_len)],
+                        self.y_event[
+                            (p * alg_len + ninputs * rhs_len) : (
+                                p * alg_len + ninputs * rhs_len + alg_len
+                            )
+                        ],
+                    )
+                    for p in range(ninputs)
+                ]
+            else:
+                y_events = [None] * ninputs
+        else:
+            state_len = rhs_len + alg_len
+            all_ys_split = [
+                [
+                    self.all_ys[i][(p * state_len) : (p * state_len + state_len)]
+                    for i in range(len(self.all_ys))
+                ]
+                for p in range(ninputs)
+            ]
+            if self.y_event is not None:
+                y_events = [
+                    self.y_event[(p * state_len) : (p * state_len + state_len)]
+                    for p in range(ninputs)
+                ]
+            else:
+                y_events = [None] * ninputs
+
+        ret = [
+            type(self)(
+                self.all_ts,
+                all_ys,
+                self.all_models,
+                inputs,
+                self.t_event,
+                y_event,
+                self.termination,
+                self.sensitivities,
+                False,
+            )
+            for all_ys, inputs, y_event in zip(all_ys_split, inputs_list, y_events)
+        ]
+        for sol in ret:
+            sol.integration_time = self.integration_time
+        return ret
+
+    @classmethod
+    def from_concatenated_state(
+        cls,
+        t,
+        y,
+        model,
+        input_list,
+        t_event=None,
+        y_event=None,
+        termination="final time",
+        sensitivities=False,
+        check_solution=True,
+    ):
+        """
+        Create a list of Solution objects from a concatenated state vector
+
+        Parameters
+        ----------
+        t : :class:`numpy.array`
+            A one-dimensional array containing the times at which the solution is
+            evaluated.
+        y : :class:`numpy.array`
+            A one-dimensional column array containing the (concatenated) values of the solution for each input in input_list.
+        model : :class:`pybamm.BaseModel`
+            The model that was used to calculate the solution.
+        input_list : list of dict
+            The inputs
+        ...: see Solution.__init__()
+        """
+        ninputs = len(input_list)
+        ny = y.shape[0] // ninputs
+        return [
+            cls(
+                t,
+                y[i * ny : (i + 1) * ny, :],
+                model,
+                input_list[i],
+                t_event,
+                y_event,
+                termination,
+                sensitivities,
+                check_solution,
+            )
+            for i in range(ninputs)
+        ]
+
+    # @classmethod
+    # def to_concatenated_state(cls, solutions):
+    #    solution = solutions[0]
+    #    all_ys = [
+    #        [np.vstack([sol.all_ys[i] for sol in solutions])]
+    #        for i in range(len(solution.all_ys))
+    #    ]
+    #    return cls(
+    #        solution._all_ts,
+    #        all_ys,
+    #        solution._all_models,
+    #        solution._all_inputs,
+    #        solution._t_event,
+    #        solution._y_event,
+    #        solution._termination,
+    #        solution.sensitivities,
+    #        False,
+    #    )
+
     def extract_explicit_sensitivities(self):
         # if we got here, we haven't set y yet
         self.set_y()

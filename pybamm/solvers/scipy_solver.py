@@ -47,37 +47,16 @@ class ScipySolver(pybamm.BaseSolver):
         self.name = f"Scipy solver ({method})"
         pybamm.citations.register("Virtanen2020")
 
-    def _integrate(self, model, t_eval, inputs_dict=None):
-        """
-        Solve a model defined by dydt with initial conditions y0.
-
-        Parameters
-        ----------
-        model : :class:`pybamm.BaseModel`
-            The model whose solution to calculate.
-        t_eval : :class:`numpy.array`, size (k,)
-            The times at which to compute the solution
-        inputs_dict : dict, optional
-            Any input parameters to pass to the model when solving
-
-        Returns
-        -------
-        object
-            An object containing the times and values of the solution, as well as
-            various diagnostic messages.
-
-        """
+    def _integrate_batch(self, model, t_eval, y0, y0S, inputs_list, inputs):
         # Save inputs dictionary, and if necessary convert inputs to a casadi vector
-        inputs_dict = inputs_dict or {}
-        if model.convert_to_format == "casadi":
-            inputs = casadi.vertcat(*[x for x in inputs_dict.values()])
-        else:
-            inputs = inputs_dict
+        inputs_list = inputs_list or [{}]
+        inputs = pybamm.BaseSolver._inputs_to_stacked_vect(
+            inputs_list, model.convert_to_format
+        )
 
         extra_options = {**self.extra_options, "rtol": self.rtol, "atol": self.atol}
 
         # Initial conditions
-        y0 = model.y0
         if isinstance(y0, casadi.DM):
             y0 = y0.full()
         y0 = y0.flatten()
@@ -142,17 +121,18 @@ class ScipySolver(pybamm.BaseSolver):
                 termination = "final time"
                 t_event = None
                 y_event = np.array(None)
-            sol = pybamm.Solution(
+            solns = pybamm.Solution.from_concatenated_state(
                 sol.t,
                 sol.y,
                 model,
-                inputs_dict,
+                inputs_list,
                 t_event,
                 y_event,
                 termination,
                 sensitivities=bool(model.calculate_sensitivities),
             )
-            sol.integration_time = integration_time
-            return sol
+            for s in solns:
+                s.integration_time = integration_time
+            return solns
         else:
             raise pybamm.SolverError(sol.message)

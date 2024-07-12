@@ -9,7 +9,7 @@ import unittest
 import numpy as np
 
 import pybamm
-from tests import get_discretisation_for_testing
+from tests import get_discretisation_for_testing, get_mesh_for_testing
 
 
 @unittest.skipIf(not pybamm.have_idaklu(), "idaklu solver is not installed")
@@ -141,6 +141,7 @@ class TestIDAKLUSolver(TestCase):
     def test_input_params(self):
         # test a mix of scalar and vector input params
         for form in ["python", "casadi", "jax"]:
+            print("form", form)
             if form == "jax" and not pybamm.have_jax():
                 continue
             if form == "casadi":
@@ -214,11 +215,59 @@ class TestIDAKLUSolver(TestCase):
                 decimal=4,
             )
 
+    def test_multiple_inputs_initial_conditions(self):
+        # Create model
+        formats = ["casadi"]
+        if pybamm.have_jax():
+            formats.append("jax")
+        for convert_to_format in formats:
+            print(convert_to_format)
+            if convert_to_format == "casadi":
+                root_method = "casadi"
+            else:
+                root_method = "lm"
+
+            model = pybamm.BaseModel()
+            model.convert_to_format = convert_to_format
+            domain = ["negative electrode", "separator", "positive electrode"]
+            var = pybamm.Variable("var", domain=domain)
+            rate = pybamm.InputParameter("rate")
+            model.rhs = {var: -rate * var}
+            model.initial_conditions = {var: 2 * rate}
+            # create discretisation
+            mesh = get_mesh_for_testing()
+            spatial_methods = {"macroscale": pybamm.FiniteVolume()}
+            disc = pybamm.Discretisation(mesh, spatial_methods)
+            disc.process_model(model)
+
+            solver = pybamm.IDAKLUSolver(root_method=root_method)
+            t_eval = np.linspace(0, 10, 100)
+            ninputs = 8
+            for batch_size in [1, 4]:
+                print("batch_size", batch_size)
+                inputs_list = [{"rate": 0.01 * (i + 1)} for i in range(ninputs)]
+
+                solutions = solver.solve(
+                    model, t_eval, inputs=inputs_list, batch_size=batch_size
+                )
+
+                # check solution
+                for inputs, solution in zip(inputs_list, solutions):
+                    print("checking input", inputs)
+                    np.testing.assert_array_equal(solution.t, t_eval)
+                    np.testing.assert_allclose(
+                        solution.y[0],
+                        2 * inputs["rate"] * np.exp(-inputs["rate"] * solution.t),
+                        atol=1e-6,
+                        rtol=1e-6,
+                    )
+
     def test_ida_roberts_klu_sensitivities(self):
         # this test implements a python version of the ida Roberts
         # example provided in sundials
         # see sundials ida examples pdf
         for form in ["python", "casadi", "jax"]:
+            print("form", form)
             if form == "jax" and not pybamm.have_jax():
                 continue
             if form == "casadi":
@@ -294,6 +343,7 @@ class TestIDAKLUSolver(TestCase):
         # example provided in sundials
         # see sundials ida examples pdf
         for form in ["casadi", "python", "jax"]:
+            print(form)
             if form == "jax" and not pybamm.have_jax():
                 continue
             if form == "casadi":

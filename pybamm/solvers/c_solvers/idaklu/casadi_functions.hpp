@@ -86,7 +86,7 @@ public:
   std::vector<double *> m_res;
 
 private:
-  const Function &m_func;
+  const Function m_func;
   std::vector<casadi_int> m_iw;
   std::vector<double> m_w;
 };
@@ -151,10 +151,12 @@ public:
 
   realtype *get_tmp_state_vector();
   realtype *get_tmp_sparse_jacobian_data();
+  realtype *get_tmp_sparse_sens_data();
 
 private:
   std::vector<realtype> tmp_state_vector;
   std::vector<realtype> tmp_sparse_jacobian_data;
+  std::vector<realtype> tmp_sparse_sens_data;
 };
 
 #endif // PYBAMM_IDAKLU_CASADI_FUNCTIONS_HPP

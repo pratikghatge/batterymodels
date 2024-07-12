@@ -50,14 +50,20 @@ class TestCasadiAlgebraicSolver(TestCase):
 
     def test_root_find_fail(self):
         class Model:
-            y0 = np.array([2])
+            y0_list = [np.array([2])]
             t = casadi.MX.sym("t")
             y = casadi.MX.sym("y")
             p = casadi.MX.sym("p")
             rhs = {}
             casadi_algebraic = casadi.Function("alg", [t, y, p], [y**2 + 1])
+            len_rhs = 0
+            len_rhs_sens = 0
+            len_alg = 1
+            len_alg_sens = 0
             bounds = (np.array([-np.inf]), np.array([np.inf]))
             interpolant_extrapolation_events_eval = []
+            batch_size = 1
+            convert_to_format = "casadi"
 
             def algebraic_eval(self, t, y, inputs):
                 # algebraic equation has no real root
@@ -78,14 +84,20 @@ class TestCasadiAlgebraicSolver(TestCase):
 
         # Model returns Nan
         class NaNModel:
-            y0 = np.array([-2])
+            y0_list = [np.array([-2])]
             t = casadi.MX.sym("t")
             y = casadi.MX.sym("y")
             p = casadi.MX.sym("p")
+            len_rhs = 0
+            len_rhs_sens = 0
+            len_alg = 1
+            len_alg_sens = 0
             rhs = {}
             casadi_algebraic = casadi.Function("alg", [t, y, p], [y**0.5])
             bounds = (np.array([-np.inf]), np.array([np.inf]))
             interpolant_extrapolation_events_eval = []
+            batch_size = 1
+            convert_to_format = "casadi"
 
             def algebraic_eval(self, t, y, inputs):
                 # algebraic equation has no real root

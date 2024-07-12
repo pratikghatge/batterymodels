@@ -3,10 +3,12 @@
 #
 # mypy: ignore-errors
 import casadi
+import scipy
+import scipy.sparse
 import pybamm
 import numpy as np
-import numbers
 import scipy.sparse as sparse
+
 
 import importlib
 
@@ -117,6 +119,10 @@ class IDAKLUSolver(pybamm.BaseSolver):
         if idaklu_spec is None:  # pragma: no cover
             raise ImportError("KLU is not installed")
 
+        base_options = {
+            "num_threads": options["num_threads"],
+        }
+
         super().__init__(
             "ida",
             rtol,
@@ -125,6 +131,7 @@ class IDAKLUSolver(pybamm.BaseSolver):
             root_tol,
             extrap_tol,
             output_variables,
+            base_options,
         )
         self.name = "IDA KLU solver"
 
@@ -154,46 +161,27 @@ class IDAKLUSolver(pybamm.BaseSolver):
 
         return atol
 
-    def set_up(self, model, inputs=None, t_eval=None, ics_only=False):
-        base_set_up_return = super().set_up(model, inputs, t_eval, ics_only)
+    def set_up(self, model, inputs=None, t_eval=None, ics_only=False, batch_size=1):
+        base_set_up_return = super().set_up(model, inputs, t_eval, ics_only, batch_size)
+        nbatches = len(inputs) // batch_size
 
-        inputs_dict = inputs or {}
-        # stack inputs
-        if inputs_dict:
-            arrays_to_stack = [np.array(x).reshape(-1, 1) for x in inputs_dict.values()]
-            inputs_sizes = [len(array) for array in arrays_to_stack]
-            inputs = np.vstack(arrays_to_stack)
+        if isinstance(inputs, dict):
+            inputs_list = [inputs]
         else:
-            inputs_sizes = []
-            inputs = np.array([[]])
+            inputs_list = inputs or [{}]
 
-        def inputs_to_dict(inputs):
-            index = 0
-            for n, key in zip(inputs_sizes, inputs_dict.keys()):
-                inputs_dict[key] = inputs[index : (index + n)]
-                index += n
-            return inputs_dict
+        inputs = self._inputs_to_stacked_vect(
+            inputs_list[:batch_size], model.convert_to_format
+        )
 
-        y0 = model.y0
-        if isinstance(y0, casadi.DM):
-            y0 = y0.full()
-        y0 = y0.flatten()
+        y0 = model.y0_list[0]
+        nstates = y0.shape[0]
 
-        y0S = model.y0S
-        # only casadi solver needs sensitivity ics
-        if model.convert_to_format != "casadi":
-            y0S = None
-            if self.output_variables:
-                raise pybamm.SolverError(
-                    "output_variables can only be specified "
-                    'with convert_to_format="casadi"'
-                )  # pragma: no cover
-        if y0S is not None:
-            if isinstance(y0S, casadi.DM):
-                y0S = (y0S,)
-
-            y0S = (x.full() for x in y0S)
-            y0S = [x.flatten() for x in y0S]
+        if model.convert_to_format != "casadi" and self.output_variables:
+            raise pybamm.SolverError(
+                "output_variables can only be specified "
+                'with convert_to_format="casadi"'
+            )  # pragma: no cover
 
         if ics_only:
             return base_set_up_return
@@ -208,6 +196,16 @@ class IDAKLUSolver(pybamm.BaseSolver):
         else:
             mass_matrix = model.mass_matrix.entries
 
+        # take care of batch size
+        if model.convert_to_format == "casadi":
+            mass_matrix = casadi.diagcat(*([mass_matrix] * batch_size))
+        elif scipy.sparse.issparse(mass_matrix):
+            mass_matrix = scipy.sparse.block_diag(
+                [mass_matrix] * batch_size, format="csr"
+            )
+        else:
+            mass_matrix = scipy.linalg.block_diag(*([mass_matrix] * batch_size))
+
         # construct residuals function by binding inputs
         if model.convert_to_format == "casadi":
             # TODO: do we need densify here?
@@ -216,7 +214,7 @@ class IDAKLUSolver(pybamm.BaseSolver):
 
             def resfn(t, y, inputs, ydot):
                 return (
-                    model.rhs_algebraic_eval(t, y, inputs_to_dict(inputs)).flatten()
+                    model.rhs_algebraic_eval(t, y, inputs).flatten()
                     - mass_matrix @ ydot
                 )
 
@@ -226,24 +224,35 @@ class IDAKLUSolver(pybamm.BaseSolver):
         # need to provide jacobian_rhs_alg - cj * mass_matrix
         if model.convert_to_format == "casadi":
             t_casadi = casadi.MX.sym("t")
-            y_casadi = casadi.MX.sym("y", model.len_rhs_and_alg)
+            y_casadi = casadi.MX.sym("y", nstates)
             cj_casadi = casadi.MX.sym("cj")
-            p_casadi = {}
-            for name, value in inputs_dict.items():
-                if isinstance(value, numbers.Number):
-                    p_casadi[name] = casadi.MX.sym(name)
-                else:
-                    p_casadi[name] = casadi.MX.sym(name, value.shape[0])
-            p_casadi_stacked = casadi.vertcat(*[p for p in p_casadi.values()])
 
-            jac_times_cjmass = casadi.Function(
-                "jac_times_cjmass",
-                [t_casadi, y_casadi, p_casadi_stacked, cj_casadi],
-                [
-                    model.jac_rhs_algebraic_eval(t_casadi, y_casadi, p_casadi_stacked)
-                    - cj_casadi * mass_matrix
-                ],
-            )
+            p_casadi_stacked = casadi.MX.sym("p_stacked", inputs.shape[0])
+
+            if batch_size == 1:
+                jac_times_cjmass = casadi.Function(
+                    "jac_times_cjmass",
+                    [t_casadi, y_casadi, p_casadi_stacked, cj_casadi],
+                    [
+                        model.jac_rhs_algebraic_eval(
+                            t_casadi, y_casadi, p_casadi_stacked
+                        )
+                        - cj_casadi * mass_matrix
+                    ],
+                )
+            else:
+                # create a casadi function that can be used to evaluate the jacobian
+                # for multiple inputs
+                jac_times_cjmass = casadi.Function(
+                    "jac_times_cjmass",
+                    [t_casadi, y_casadi, p_casadi_stacked, cj_casadi],
+                    [
+                        model.jac_rhs_algebraic_eval(
+                            t_casadi, y_casadi, p_casadi_stacked
+                        )
+                        - cj_casadi * mass_matrix
+                    ],
+                )
 
             jac_times_cjmass_sparsity = jac_times_cjmass.sparsity_out(0)
             jac_bw_lower = jac_times_cjmass_sparsity.bw_lower()
@@ -256,7 +265,7 @@ class IDAKLUSolver(pybamm.BaseSolver):
                 jac_times_cjmass_sparsity.row(), dtype=np.int64
             )
 
-            v_casadi = casadi.MX.sym("v", model.len_rhs_and_alg)
+            v_casadi = casadi.MX.sym("v", nstates)
 
             jac_rhs_algebraic_action = model.jac_rhs_algebraic_action_eval
 
@@ -281,7 +290,7 @@ class IDAKLUSolver(pybamm.BaseSolver):
                     idaklu.generate_function(self.computed_var_fcns[key].serialize())
                 )
                 # Convert derivative functions for sensitivities
-                if (len(inputs) > 0) and (model.calculate_sensitivities):
+                if (inputs.shape[0] > 0) and (model.calculate_sensitivities):
                     self.dvar_dy_idaklu_fcns.append(
                         idaklu.generate_function(
                             self.computed_dvar_dy_fcns[key].serialize()
@@ -295,22 +304,18 @@ class IDAKLUSolver(pybamm.BaseSolver):
 
         else:
             t0 = 0 if t_eval is None else t_eval[0]
-            jac_y0_t0 = model.jac_rhs_algebraic_eval(t0, y0, inputs_dict)
+            jac_y0_t0 = model.jac_rhs_algebraic_eval(t0, y0, inputs)
             if sparse.issparse(jac_y0_t0):
 
                 def jacfn(t, y, inputs, cj):
-                    j = (
-                        model.jac_rhs_algebraic_eval(t, y, inputs_to_dict(inputs))
-                        - cj * mass_matrix
-                    )
+                    j = model.jac_rhs_algebraic_eval(t, y, inputs) - cj * mass_matrix
                     return j
 
             else:
 
                 def jacfn(t, y, inputs, cj):
                     jac_eval = (
-                        model.jac_rhs_algebraic_eval(t, y, inputs_to_dict(inputs))
-                        - cj * mass_matrix
+                        model.jac_rhs_algebraic_eval(t, y, inputs) - cj * mass_matrix
                     )
                     return sparse.csr_matrix(jac_eval)
 
@@ -318,7 +323,7 @@ class IDAKLUSolver(pybamm.BaseSolver):
                 def __init__(self):
                     self.J = None
 
-                    random = np.random.random(size=y0.size)
+                    random = np.random.random(size=nstates)
                     J = jacfn(10, random, inputs, 20)
                     self.nnz = J.nnz  # hoping nnz remains constant...
 
@@ -358,28 +363,26 @@ class IDAKLUSolver(pybamm.BaseSolver):
         else:
 
             def rootfn(t, y, inputs):
-                new_inputs = inputs_to_dict(inputs)
                 return_root = np.array(
-                    [event(t, y, new_inputs) for event in model.terminate_events_eval]
+                    [event(t, y, inputs) for event in model.terminate_events_eval]
                 ).reshape(-1)
 
                 return return_root
 
         # get ids of rhs and algebraic variables
-        if model.convert_to_format == "casadi":
-            rhs_ids = np.ones(model.rhs_eval(0, y0, inputs).shape[0])
-        else:
-            rhs_ids = np.ones(model.rhs_eval(0, y0, inputs_dict).shape[0])
-        alg_ids = np.zeros(len(y0) - len(rhs_ids))
-        ids = np.concatenate((rhs_ids, alg_ids))
+        ids = np.concatenate(
+            [np.ones(model.len_rhs), np.zeros(model.len_alg)] * batch_size
+        )
 
         number_of_sensitivity_parameters = 0
         if model.jacp_rhs_algebraic_eval is not None:
             sensitivity_names = model.calculate_sensitivities
-            if model.convert_to_format == "casadi":
-                number_of_sensitivity_parameters = model.jacp_rhs_algebraic_eval.n_out()
-            else:
-                number_of_sensitivity_parameters = len(sensitivity_names)
+            for name in model.calculate_sensitivities:
+                inp = inputs_list[0][name]
+                if isinstance(inp, np.ndarray):
+                    number_of_sensitivity_parameters += inp.size
+                else:
+                    number_of_sensitivity_parameters += 1
         else:
             sensitivity_names = []
 
@@ -421,13 +424,12 @@ class IDAKLUSolver(pybamm.BaseSolver):
 
                 """
 
-                new_inputs = inputs_to_dict(inputs)
-                dFdy = model.jac_rhs_algebraic_eval(t, y, new_inputs)
+                dFdy = model.jac_rhs_algebraic_eval(t, y, inputs)
                 dFdyd = mass_matrix
-                dFdp = model.jacp_rhs_algebraic_eval(t, y, new_inputs)
+                dFdp = model.jacp_rhs_algebraic_eval(t, y, inputs)
 
-                for i, dFdp_i in enumerate(dFdp.values()):
-                    resvalS[i][:] = dFdy @ yS[i] - dFdyd @ ypS[i] + dFdp_i
+                for i in range(dFdp.shape[1]):
+                    resvalS[i][:] = dFdy @ yS[i] - dFdyd @ ypS[i] + dFdp[:, [i]]
 
         try:
             atol = model.atol
@@ -435,7 +437,7 @@ class IDAKLUSolver(pybamm.BaseSolver):
             atol = self.atol
 
         rtol = self.rtol
-        atol = self._check_atol_type(atol, y0.size)
+        atol = self._check_atol_type(atol, nstates)
 
         if model.convert_to_format == "casadi":
             rhs_algebraic = idaklu.generate_function(rhs_algebraic.serialize())
@@ -470,8 +472,8 @@ class IDAKLUSolver(pybamm.BaseSolver):
                 "dvar_dp_idaklu_fcns": self.dvar_dp_idaklu_fcns,
             }
 
-            solver = idaklu.create_casadi_solver(
-                number_of_states=len(y0),
+            solver = idaklu.create_casadi_solver_group(
+                number_of_states=nstates,
                 number_of_parameters=self._setup["number_of_sensitivity_parameters"],
                 rhs_alg=self._setup["rhs_algebraic"],
                 jac_times_cjmass=self._setup["jac_times_cjmass"],
@@ -488,11 +490,12 @@ class IDAKLUSolver(pybamm.BaseSolver):
                 rhs_alg_id=self._setup["ids"],
                 atol=atol,
                 rtol=rtol,
-                inputs=len(inputs),
+                inputs=inputs.shape[0],
                 var_casadi_fcns=self._setup["var_idaklu_fcns"],
                 dvar_dy_fcns=self._setup["dvar_dy_idaklu_fcns"],
                 dvar_dp_fcns=self._setup["dvar_dp_idaklu_fcns"],
                 options=self._options,
+                nsolvers=nbatches,
             )
 
             self._setup["solver"] = solver
@@ -511,121 +514,132 @@ class IDAKLUSolver(pybamm.BaseSolver):
 
         return base_set_up_return
 
-    def _integrate(self, model, t_eval, inputs_dict=None):
+    def _integrate(
+        self, model, t_eval, inputs_list=None, batched_inputs=None, nproc=None
+    ):
         """
-        Solve a DAE model defined by residuals with initial conditions y0.
+        Overloads the _integrate method from BaseSolver to use the IDAKLU solver
+        """
 
-        Parameters
-        ----------
-        model : :class:`pybamm.BaseModel`
-            The model whose solution to calculate.
-        t_eval : numeric type
-            The times at which to compute the solution
-        inputs_dict : dict, optional
-            Any input parameters to pass to the model when solving
-        """
-        inputs_dict = inputs_dict or {}
-        # stack inputs
-        if inputs_dict:
-            arrays_to_stack = [np.array(x).reshape(-1, 1) for x in inputs_dict.values()]
-            inputs = np.vstack(arrays_to_stack)
-        else:
-            inputs = np.array([[]])
+        inputs_list, batched_inputs, nbatches, batch_size, y0S_list = (
+            self._handle_integrate_defaults(model, inputs_list, batched_inputs)
+        )
 
         # do this here cause y0 is set after set_up (calc consistent conditions)
-        y0 = model.y0
-        if isinstance(y0, casadi.DM):
-            y0 = y0.full()
-        y0 = y0.flatten()
+        def handle_y0(y0):
+            if y0 is None:
+                return y0
+            if isinstance(y0, casadi.DM):
+                y0 = y0.full()
+            y0 = y0.flatten()
+            return y0
 
-        y0S = model.y0S
+        y0_list = [handle_y0(y0) for y0 in model.y0_list]
+        batched_inputs = [handle_y0(inputs) for inputs in batched_inputs]
+
         # only casadi solver needs sensitivity ics
-        if model.convert_to_format != "casadi":
-            y0S = None
-        if y0S is not None:
-            if isinstance(y0S, casadi.DM):
-                y0S = (y0S,)
-
-            y0S = (x.full() for x in y0S)
-            y0S = [x.flatten() for x in y0S]
+        if model.convert_to_format == "casadi" and y0S_list[0] is not None:
+            # concatentate the senstivity initial conditions to the state vector
+            y0S_list = [handle_y0(y0S) for y0S in y0S_list]
+            y0full_list = [
+                np.concatenate([y0, y0S]) for y0, y0S in zip(y0_list, y0S_list)
+            ]
+        else:
+            y0full_list = y0_list
 
         # solver works with ydot0 set to zero
-        ydot0 = np.zeros_like(y0)
-        if y0S is not None:
-            ydot0S = [np.zeros_like(y0S_i) for y0S_i in y0S]
-            y0full = np.concatenate([y0, *y0S])
-            ydot0full = np.concatenate([ydot0, *ydot0S])
-        else:
-            y0full = y0
-            ydot0full = ydot0
+        ydot0full_list = [np.zeros_like(y0full) for y0full in y0full_list]
 
         try:
             atol = model.atol
         except AttributeError:
             atol = self.atol
 
+        # solver takes individual y0s and ydot0s as rows in a 2d array
+        y0full = np.vstack(y0full_list)
+        ydot0full = np.vstack(ydot0full_list)
+        inputs = np.vstack(batched_inputs)
+
         rtol = self.rtol
-        atol = self._check_atol_type(atol, y0.size)
+        atol = self._check_atol_type(atol, y0_list[0].size)
 
         timer = pybamm.Timer()
         if model.convert_to_format == "casadi":
-            sol = self._setup["solver"].solve(
+            sols = self._setup["solver"].solve(
                 t_eval,
                 y0full,
                 ydot0full,
                 inputs,
             )
         else:
-            sol = idaklu.solve_python(
-                t_eval,
-                y0,
-                ydot0,
-                self._setup["resfn"],
-                self._setup["jac_class"].jac_res,
-                self._setup["sensfn"],
-                self._setup["jac_class"].get_jac_data,
-                self._setup["jac_class"].get_jac_row_vals,
-                self._setup["jac_class"].get_jac_col_ptrs,
-                self._setup["jac_class"].nnz,
-                self._setup["rootfn"],
-                self._setup["num_of_events"],
-                self._setup["use_jac"],
-                self._setup["ids"],
-                atol,
-                rtol,
-                inputs,
-                self._setup["number_of_sensitivity_parameters"],
-            )
+            ydot0 = np.zeros_like(y0_list[0])
+            sols = []
+            for y0, inputs in zip(y0_list, batched_inputs):
+                inputs = inputs.reshape(-1, 1)
+                sols.append(
+                    idaklu.solve_python(
+                        t_eval,
+                        y0,
+                        ydot0,
+                        self._setup["resfn"],
+                        self._setup["jac_class"].jac_res,
+                        self._setup["sensfn"],
+                        self._setup["jac_class"].get_jac_data,
+                        self._setup["jac_class"].get_jac_row_vals,
+                        self._setup["jac_class"].get_jac_col_ptrs,
+                        self._setup["jac_class"].nnz,
+                        self._setup["rootfn"],
+                        self._setup["num_of_events"],
+                        1,
+                        self._setup["ids"],
+                        atol,
+                        rtol,
+                        inputs,
+                        self._setup["number_of_sensitivity_parameters"],
+                    )
+                )
+
         integration_time = timer.time()
+
+        for sol in sols:
+            if sol.flag not in [0, 2]:
+                raise pybamm.SolverError("idaklu solver failed")
 
         number_of_sensitivity_parameters = self._setup[
             "number_of_sensitivity_parameters"
         ]
         sensitivity_names = self._setup["sensitivity_names"]
-        t = sol.t
-        number_of_timesteps = t.size
-        number_of_states = y0.size
-        if self.output_variables:
-            # Substitute empty vectors for state vector 'y'
-            y_out = np.zeros((number_of_timesteps * number_of_states, 0))
-        else:
-            y_out = sol.y.reshape((number_of_timesteps, number_of_states))
 
-        # return sensitivity solution, we need to flatten yS to
-        # (#timesteps * #states (where t is changing the quickest),)
-        # to match format used by Solution
-        # note that yS is (n_p, n_t, n_y)
-        if number_of_sensitivity_parameters != 0:
-            yS_out = {
-                name: sol.yS[i].reshape(-1, 1)
-                for i, name in enumerate(sensitivity_names)
-            }
-            # add "all" stacked sensitivities ((#timesteps * #states,#sens_params))
-            yS_out["all"] = np.hstack([yS_out[name] for name in sensitivity_names])
-        else:
-            yS_out = False
+        pybamm_sols = []
 
-        if sol.flag in [0, 2]:
+        for i, sol in enumerate(sols):
+            inputs_sublist = inputs_list[i * batch_size : (i + 1) * batch_size]
+            t = sol.t
+            number_of_timesteps = t.size
+            number_of_states = y0_list[0].shape[0]
+
+            sol_y = sol.y
+            sol_yS = sol.yS
+            if self.output_variables:
+                # Substitute empty vectors for state vector 'y'
+                y_out = np.zeros((number_of_timesteps * number_of_states, 0))
+            else:
+                y_out = sol_y.reshape((number_of_timesteps, number_of_states))
+
+            # return sensitivity solution, we need to flatten yS to
+            # (#timesteps * #states (where t is changing the quickest),)
+            # to match format used by Solution
+            # note that yS is (n_p, n_t, n_y)
+            if number_of_sensitivity_parameters != 0:
+                yS_out = {
+                    name: sol_yS[i].reshape(-1, 1)
+                    for i, name in enumerate(sensitivity_names)
+                }
+                # add "all" stacked sensitivities ((#timesteps * #states,#sens_params))
+                yS_out["all"] = np.hstack([yS_out[name] for name in sensitivity_names])
+            else:
+                yS_out = False
+
             # 0 = solved for all t_eval
             if sol.flag == 0:
                 termination = "final time"
@@ -633,50 +647,52 @@ class IDAKLUSolver(pybamm.BaseSolver):
             elif sol.flag == 2:
                 termination = "event"
 
-            newsol = pybamm.Solution(
+            batchsols = pybamm.Solution.from_concatenated_state(
                 sol.t,
                 np.transpose(y_out),
                 model,
-                inputs_dict,
+                inputs_sublist,
                 np.array([t[-1]]),
                 np.transpose(y_out[-1])[:, np.newaxis],
                 termination,
                 sensitivities=yS_out,
             )
-            newsol.integration_time = integration_time
-            if self.output_variables:
-                # Populate variables and sensititivies dictionaries directly
-                number_of_samples = sol.y.shape[0] // number_of_timesteps
-                sol.y = sol.y.reshape((number_of_timesteps, number_of_samples))
-                startk = 0
-                for _, var in enumerate(self.output_variables):
-                    # ExplicitTimeIntegral's are not computed as part of the solver and
-                    # do not need to be converted
-                    if isinstance(
-                        model.variables_and_events[var], pybamm.ExplicitTimeIntegral
-                    ):
-                        continue
-                    len_of_var = (
-                        self._setup["var_casadi_fcns"][var](0, 0, 0).sparsity().nnz()
-                    )
-                    newsol._variables[var] = pybamm.ProcessedVariableComputed(
-                        [model.variables_and_events[var]],
-                        [self._setup["var_casadi_fcns"][var]],
-                        [sol.y[:, startk : (startk + len_of_var)]],
-                        newsol,
-                    )
-                    # Add sensitivities
-                    newsol[var]._sensitivities = {}
-                    if model.calculate_sensitivities:
-                        for paramk, param in enumerate(inputs_dict.keys()):
-                            newsol[var].add_sensitivity(
-                                param,
-                                [sol.yS[:, startk : (startk + len_of_var), paramk]],
-                            )
-                    startk += len_of_var
-            return newsol
-        else:
-            raise pybamm.SolverError("idaklu solver failed")
+            for s in batchsols:
+                s.integration_time = integration_time
+                if self.output_variables:
+                    # Populate variables and sensititivies dictionaries directly
+                    number_of_samples = sol_y.shape[0] // number_of_timesteps
+                    sol_y = sol_y.reshape((number_of_timesteps, number_of_samples))
+                    startk = 0
+                    for _, var in enumerate(self.output_variables):
+                        # ExplicitTimeIntegral's are not computed as part of the solver and
+                        # do not need to be converted
+                        if isinstance(
+                            model.variables_and_events[var], pybamm.ExplicitTimeIntegral
+                        ):
+                            continue
+                        len_of_var = (
+                            self._setup["var_casadi_fcns"][var](0, 0, 0)
+                            .sparsity()
+                            .nnz()
+                        )
+                        s._variables[var] = pybamm.ProcessedVariableComputed(
+                            [model.variables_and_events[var]],
+                            [self._setup["var_casadi_fcns"][var]],
+                            [sol_y[:, startk : (startk + len_of_var)]],
+                            s,
+                        )
+                        # Add sensitivities
+                        s[var]._sensitivities = {}
+                        if model.calculate_sensitivities:
+                            for paramk, param in enumerate(inputs_list[0].keys()):
+                                s[var].add_sensitivity(
+                                    param,
+                                    [sol_yS[:, startk : (startk + len_of_var), paramk]],
+                                )
+                        startk += len_of_var
+            pybamm_sols += batchsols
+        return pybamm_sols
 
     def jaxify(
         self,
