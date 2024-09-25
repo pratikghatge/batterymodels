@@ -180,7 +180,7 @@ class BaseIntegrationTestLithiumIon:
         options = {"SEI": "reaction limited (asymmetric)"}
         parameter_values = pybamm.ParameterValues("Marquis2019")
         parameter_values.update(
-            {"SEI growth transfer coefficient": 0.2},
+            {"Negative SEI growth transfer coefficient": 0.2},
             check_already_exists=False,
         )
         self.run_basic_processing_test(options, parameter_values=parameter_values)
@@ -211,7 +211,7 @@ class BaseIntegrationTestLithiumIon:
         }
         parameter_values = pybamm.ParameterValues("Marquis2019")
         parameter_values.update(
-            {"SEI growth transfer coefficient": 0.2},
+            {"Negative SEI growth transfer coefficient": 0.2},
             check_already_exists=False,
         )
         self.run_basic_processing_test(options, parameter_values=parameter_values)
@@ -333,6 +333,7 @@ class BaseIntegrationTestLithiumIon:
             "particle phases": ("2", "1"),
             "open-circuit potential": (("single", "current sigmoid"), "single"),
             "SEI": "ec reaction limited",
+            "SEI porosity change": "true",
         }
         parameter_values = pybamm.ParameterValues("Chen2020_composite")
         name = "Negative electrode active material volume fraction"

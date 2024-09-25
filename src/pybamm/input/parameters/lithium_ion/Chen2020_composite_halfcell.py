@@ -3,6 +3,37 @@ import os
 import numpy as np
 
 
+def li_metal_electrolyte_exchange_current_density_Xu2019(c_e, c_Li, T):
+    """
+    Exchange-current density for Butler-Volmer reactions between li metal and LiPF6 in
+    EC:DMC.
+
+    References
+    ----------
+    .. [1] Xu, Shanshan, Chen, Kuan-Hung, Dasgupta, Neil P., Siegel, Jason B. and
+    Stefanopoulou, Anna G. "Evolution of Dead Lithium Growth in Lithium Metal Batteries:
+    Experimentally Validated Model of the Apparent Capacity Loss." Journal of The
+    Electrochemical Society 166.14 (2019): A3456-A3463.
+
+    Parameters
+    ----------
+    c_e : :class:`pybamm.Symbol`
+        Electrolyte concentration [mol.m-3]
+    c_Li : :class:`pybamm.Symbol`
+        Pure metal lithium concentration [mol.m-3]
+    T : :class:`pybamm.Symbol`
+        Temperature [K]
+
+    Returns
+    -------
+    :class:`pybamm.Symbol`
+        Exchange-current density [A.m-2]
+    """
+    m_ref = 3.5e-8 * pybamm.constants.F  # (A/m2)(mol/m3) - includes ref concentrations
+
+    return m_ref * c_Li**0.7 * c_e**0.3
+
+
 def graphite_LGM50_electrolyte_exchange_current_density_Chen2020(
     c_e, c_s_surf, c_s_max, T
 ):
@@ -168,75 +199,6 @@ def silicon_LGM50_electrolyte_exchange_current_density_Chen2020(
     return m_ref * arrhenius * c_e**0.5 * c_s_surf**0.5 * (c_s_max - c_s_surf) ** 0.5
 
 
-def nmc_LGM50_ocp_Chen2020(sto):
-    """
-    LG M50 NMC open-circuit potential as a function of stoichiometry, fit taken
-    from [1].
-
-    References
-    ----------
-    .. [1] Chang-Hui Chen, Ferran Brosa Planella, Kieran O’Regan, Dominika Gastol, W.
-    Dhammika Widanage, and Emma Kendrick. "Development of Experimental Techniques for
-    Parameterization of Multi-scale Lithium-ion Battery Models." Journal of the
-    Electrochemical Society 167 (2020): 080534.
-
-    Parameters
-    ----------
-    sto: :class:`pybamm.Symbol`
-        Electrode stoichiometry
-
-    Returns
-    -------
-    :class:`pybamm.Symbol`
-        Open-circuit potential
-    """
-
-    u_eq = (
-        -0.8090 * sto
-        + 4.4875
-        - 0.0428 * np.tanh(18.5138 * (sto - 0.5542))
-        - 17.7326 * np.tanh(15.7890 * (sto - 0.3117))
-        + 17.5842 * np.tanh(15.9308 * (sto - 0.3120))
-    )
-
-    return u_eq
-
-
-def nmc_LGM50_electrolyte_exchange_current_density_Chen2020(c_e, c_s_surf, c_s_max, T):
-    """
-    Exchange-current density for Butler-Volmer reactions between NMC and LiPF6 in
-    EC:DMC.
-
-    References
-    ----------
-    .. [1] Chang-Hui Chen, Ferran Brosa Planella, Kieran O’Regan, Dominika Gastol, W.
-    Dhammika Widanage, and Emma Kendrick. "Development of Experimental Techniques for
-    Parameterization of Multi-scale Lithium-ion Battery Models." Journal of the
-    Electrochemical Society 167 (2020): 080534.
-
-    Parameters
-    ----------
-    c_e : :class:`pybamm.Symbol`
-        Electrolyte concentration [mol.m-3]
-    c_s_surf : :class:`pybamm.Symbol`
-        Particle concentration [mol.m-3]
-    c_s_max : :class:`pybamm.Symbol`
-        Maximum particle concentration [mol.m-3]
-    T : :class:`pybamm.Symbol`
-        Temperature [K]
-
-    Returns
-    -------
-    :class:`pybamm.Symbol`
-        Exchange-current density [A.m-2]
-    """
-    m_ref = 3.42e-6  # (A/m2)(m3/mol)**1.5 - includes ref concentrations
-    E_r = 17800
-    arrhenius = np.exp(E_r / pybamm.constants.R * (1 / 298.15 - 1 / T))
-
-    return m_ref * arrhenius * c_e**0.5 * c_s_surf**0.5 * (c_s_max - c_s_surf) ** 0.5
-
-
 def electrolyte_diffusivity_Nyman2008(c_e, T):
     """
     Diffusivity of LiPF6 in EC:EMC (3:7) as a function of ion concentration. The data
@@ -327,124 +289,129 @@ def get_parameter_values():
     return {
         "chemistry": "lithium_ion",
         # sei
-        "Primary: Ratio of lithium moles to negative SEI moles": 2.0,
-        "Primary: Negative inner SEI reaction proportion": 0.5,
-        "Primary: Negative inner SEI partial molar volume [m3.mol-1]": 9.585e-05,
-        "Primary: Negative outer SEI partial molar volume [m3.mol-1]": 9.585e-05,
-        "Primary: Negative SEI reaction exchange current density [A.m-2]": 1.5e-07,
-        "Primary: Negative SEI resistivity [Ohm.m]": 200000.0,
-        "Primary: Negative outer SEI solvent diffusivity [m2.s-1]"
+        "Ratio of lithium moles to negative SEI moles": 2.0,
+        "Negative inner SEI reaction proportion": 0.5,
+        "Negative inner SEI partial molar volume [m3.mol-1]": 9.585e-05,
+        "Negative outer SEI partial molar volume [m3.mol-1]": 9.585e-05,
+        "Negative SEI reaction exchange current density [A.m-2]": 1.5e-07,
+        "Negative SEI resistivity [Ohm.m]": 200000.0,
+        "Negative outer SEI solvent diffusivity [m2.s-1]": 2.5000000000000002e-22,
+        "Bulk solvent concentration for negative SEI [mol.m-3]": 2636.0,
+        "Negative inner SEI open-circuit potential [V]": 0.1,
+        "Negative outer SEI open-circuit potential [V]": 0.8,
+        "Negative inner SEI electron conductivity [S.m-1]": 8.95e-14,
+        "Negative inner SEI lithium interstitial diffusivity [m2.s-1]": 1e-20,
+        "Negative lithium interstitial reference concentration [mol.m-3]": 15.0,
+        "Initial negative inner SEI thickness [m]": 2.5e-09,
+        "Initial negative outer SEI thickness [m]": 2.5e-09,
+        "Negative EC initial concentration in electrolyte [mol.m-3]": 4541.0,
+        "EC diffusivity through negative SEI [m2.s-1]": 2e-18,
+        "Negative SEI kinetic rate constant [m.s-1]": 1e-12,
+        "Negative SEI open-circuit potential [V]": 0.4,
+        "Negative SEI growth activation energy [J.mol-1]": 0.0,
+        "Primary: Ratio of lithium moles to positive SEI moles": 2.0,
+        "Primary: Positive inner SEI reaction proportion": 0.5,
+        "Primary: Positive inner SEI partial molar volume [m3.mol-1]": 9.585e-05,
+        "Primary: Posituve outer SEI partial molar volume [m3.mol-1]": 9.585e-05,
+        "Primary: Positive SEI reaction exchange current density [A.m-2]": 1.5e-07,
+        "Primary: Positive SEI resistivity [Ohm.m]": 200000.0,
+        "Primary: Positive outer SEI solvent diffusivity [m2.s-1]"
         "": 2.5000000000000002e-22,
-        "Primary: Bulk solvent concentration for negative SEI [mol.m-3]": 2636.0,
-        "Primary: Negative inner SEI open-circuit potential [V]": 0.1,
-        "Primary: Negative outer SEI open-circuit potential [V]": 0.8,
-        "Primary: Negative inner SEI electron conductivity [S.m-1]": 8.95e-14,
-        "Primary: Negative inner SEI lithium interstitial diffusivity [m2.s-1]": 1e-20,
-        "Primary: Negative lithium interstitial reference concentration [mol.m-3]"
+        "Primary: Bulk solvent concentration for positive SEI [mol.m-3]": 2636.0,
+        "Primary: Positive inner SEI open-circuit potential [V]": 0.1,
+        "Primary: Positive outer SEI open-circuit potential [V]": 0.8,
+        "Primary: Positive inner SEI electron conductivity [S.m-1]": 8.95e-14,
+        "Primary: Positive inner SEI lithium interstitial diffusivity [m2.s-1]": 1e-20,
+        "Primary: Positive lithium interstitial reference concentration [mol.m-3]"
         "": 15.0,
-        "Primary: Initial negative inner SEI thickness [m]": 2.5e-09,
-        "Primary: Initial negative outer SEI thickness [m]": 2.5e-09,
-        "Primary: Negative EC initial concentration in electrolyte [mol.m-3]": 4541.0,
-        "Primary: EC diffusivity through negative SEI [m2.s-1]": 2e-18,
-        "Primary: Negative SEI kinetic rate constant [m.s-1]": 1e-12,
-        "Primary: Negative SEI open-circuit potential [V]": 0.4,
-        "Primary: Negative SEI growth activation energy [J.mol-1]": 0.0,
-        "Secondary: Ratio of lithium moles to negative SEI moles": 2.0,
-        "Secondary: Negative inner SEI reaction proportion": 0.5,
-        "Secondary: Negative inner SEI partial molar volume [m3.mol-1]": 9.585e-05,
-        "Secondary: Negative outer SEI partial molar volume [m3.mol-1]": 9.585e-05,
-        "Secondary: Negative SEI reaction exchange current density [A.m-2]": 1.5e-07,
-        "Secondary: Negative SEI resistivity [Ohm.m]": 200000.0,
-        "Secondary: Negative outer SEI solvent diffusivity [m2.s-1]"
+        "Primary: Initial positive inner SEI thickness [m]": 2.5e-09,
+        "Primary: Initial positive outer SEI thickness [m]": 2.5e-09,
+        "Primary: Positive EC initial concentration in electrolyte [mol.m-3]": 4541.0,
+        "Primary: EC diffusivity through positive SEI [m2.s-1]": 2e-18,
+        "Primary: Positive SEI kinetic rate constant [m.s-1]": 1e-12,
+        "Primary: Positive SEI open-circuit potential [V]": 0.4,
+        "Primary: Positive SEI growth activation energy [J.mol-1]": 0.0,
+        "Secondary: Ratio of lithium moles to positive SEI moles": 2.0,
+        "Secondary: Positive inner SEI reaction proportion": 0.5,
+        "Secondary: Positive inner SEI partial molar volume [m3.mol-1]": 9.585e-05,
+        "Secondary: Positive outer SEI partial molar volume [m3.mol-1]": 9.585e-05,
+        "Secondary: Positive SEI reaction exchange current density [A.m-2]": 1.5e-07,
+        "Secondary: Positive SEI resistivity [Ohm.m]": 200000.0,
+        "Secondary: Positive outer SEI solvent diffusivity [m2.s-1]"
         "": 2.5000000000000002e-22,
-        "Secondary: Bulk solvent concentration for negative SEI [mol.m-3]": 2636.0,
-        "Secondary: Negative inner SEI open-circuit potential [V]": 0.1,
-        "Secondary: Negative outer SEI open-circuit potential [V]": 0.8,
-        "Secondary: Negative inner SEI electron conductivity [S.m-1]": 8.95e-14,
-        "Secondary: Negative inner SEI lithium interstitial diffusivity [m2.s-1]"
+        "Secondary: Bulk solvent concentration for positive SEI [mol.m-3]": 2636.0,
+        "Secondary: Positive inner SEI open-circuit potential [V]": 0.1,
+        "Secondary: Positive outer SEI open-circuit potential [V]": 0.8,
+        "Secondary: Positive inner SEI electron conductivity [S.m-1]": 8.95e-14,
+        "Secondary: Positive inner SEI lithium interstitial diffusivity [m2.s-1]"
         "": 1e-20,
-        "Secondary: Negative lithium interstitial reference concentration [mol.m-3]"
+        "Secondary: Positive lithium interstitial reference concentration [mol.m-3]"
         "": 15.0,
-        "Secondary: Initial negative inner SEI thickness [m]": 2.5e-09,
-        "Secondary: Initial negative outer SEI thickness [m]": 2.5e-09,
-        "Secondary: Negative EC initial concentration in electrolyte [mol.m-3]": 4541.0,
-        "Secondary: EC diffusivity through negative SEI [m2.s-1]": 2e-18,
-        "Secondary: Negative SEI kinetic rate constant [m.s-1]": 1e-12,
-        "Secondary: Negative SEI open-circuit potential [V]": 0.4,
-        "Secondary: Negative SEI growth activation energy [J.mol-1]": 0.0,
-        "Positive electrode reaction-driven LAM factor [m3.mol-1]": 0.0,
+        "Secondary: Initial positive inner SEI thickness [m]": 2.5e-09,
+        "Secondary: Initial positive outer SEI thickness [m]": 2.5e-09,
+        "Secondary: Positive EC initial concentration in electrolyte [mol.m-3]": 4541.0,
+        "Secondary: EC diffusivity through positive SEI [m2.s-1]": 2e-18,
+        "Secondary: Positive SEI kinetic rate constant [m.s-1]": 1e-12,
+        "Secondary: Positive SEI open-circuit potential [V]": 0.4,
+        "Secondary: Positive SEI growth activation energy [J.mol-1]": 0.0,
         # cell
         "Negative current collector thickness [m]": 1.2e-05,
-        "Negative electrode thickness [m]": 8.52e-05,
+        "Negative electrode thickness [m]": 0.0007,
+        "Positive current collector thickness [m]": 1.2e-05,
+        "Positive electrode thickness [m]": 8.52e-05,
         "Separator thickness [m]": 1.2e-05,
-        "Positive electrode thickness [m]": 7.56e-05,
-        "Positive current collector thickness [m]": 1.6e-05,
         "Electrode height [m]": 0.065,
         "Electrode width [m]": 1.58,
         "Cell cooling surface area [m2]": 0.00531,
         "Cell volume [m3]": 2.42e-05,
         "Cell thermal expansion coefficient [m.K-1]": 1.1e-06,
-        "Negative current collector conductivity [S.m-1]": 58411000.0,
-        "Positive current collector conductivity [S.m-1]": 36914000.0,
-        "Negative current collector density [kg.m-3]": 8960.0,
-        "Positive current collector density [kg.m-3]": 2700.0,
-        "Negative current collector specific heat capacity [J.kg-1.K-1]": 385.0,
-        "Positive current collector specific heat capacity [J.kg-1.K-1]": 897.0,
-        "Negative current collector thermal conductivity [W.m-1.K-1]": 401.0,
-        "Positive current collector thermal conductivity [W.m-1.K-1]": 237.0,
+        "Positive current collector conductivity [S.m-1]": 58411000.0,
+        "Positive current collector density [kg.m-3]": 8960.0,
+        "Positive current collector specific heat capacity [J.kg-1.K-1]": 385.0,
+        "Positive current collector thermal conductivity [W.m-1.K-1]": 401.0,
         "Nominal cell capacity [A.h]": 5.0,
         "Current function [A]": 5.0,
         "Contact resistance [Ohm]": 0,
         # negative electrode
-        "Negative electrode conductivity [S.m-1]": 215.0,
-        "Primary: Maximum concentration in negative electrode [mol.m-3]": 28700.0,
-        "Primary: Initial concentration in negative electrode [mol.m-3]": 27700.0,
-        "Primary: Negative particle diffusivity [m2.s-1]": 5.5e-14,
-        "Primary: Negative electrode OCP [V]": graphite_ocp_Enertech_Ai2020,
-        "Negative electrode porosity": 0.25,
-        "Primary: Negative electrode active material volume fraction": 0.735,
-        "Primary: Negative particle radius [m]": 5.86e-06,
-        "Negative electrode Bruggeman coefficient (electrolyte)": 1.5,
-        "Negative electrode Bruggeman coefficient (electrode)": 0,
+        "Negative electrode OCP [V]": 0.0,
+        "Negative electrode conductivity [S.m-1]": 10776000.0,
+        "Negative electrode OCP entropic change [V.K-1]": 0.0,
+        "Exchange-current density for lithium metal electrode [A.m-2]"
+        "": li_metal_electrolyte_exchange_current_density_Xu2019,
         "Negative electrode charge transfer coefficient": 0.5,
         "Negative electrode double-layer capacity [F.m-2]": 0.2,
-        "Primary: Negative electrode exchange-current density [A.m-2]"
-        "": graphite_LGM50_electrolyte_exchange_current_density_Chen2020,
-        "Primary: Negative electrode density [kg.m-3]": 1657.0,
-        "Negative electrode specific heat capacity [J.kg-1.K-1]": 700.0,
-        "Negative electrode thermal conductivity [W.m-1.K-1]": 1.7,
-        "Primary: Negative electrode OCP entropic change [V.K-1]": 0.0,
-        "Secondary: Maximum concentration in negative electrode [mol.m-3]": 278000.0,
-        "Secondary: Initial concentration in negative electrode [mol.m-3]": 276610.0,
-        "Secondary: Negative particle diffusivity [m2.s-1]": 1.67e-14,
-        "Secondary: Negative electrode lithiation OCP [V]"
-        "": silicon_ocp_lithiation_Mark2016,
-        "Secondary: Negative electrode delithiation OCP [V]"
-        "": silicon_ocp_delithiation_Mark2016,
-        "Secondary: Negative electrode active material volume fraction": 0.015,
-        "Secondary: Negative particle radius [m]": 1.52e-06,
-        "Secondary: Negative electrode exchange-current density [A.m-2]"
-        "": silicon_LGM50_electrolyte_exchange_current_density_Chen2020,
-        "Secondary: Negative electrode density [kg.m-3]": 2650.0,
-        "Secondary: Negative electrode OCP entropic change [V.K-1]": 0.0,
         # positive electrode
-        "Positive electrode conductivity [S.m-1]": 0.18,
-        "Maximum concentration in positive electrode [mol.m-3]": 63104.0,
-        "Positive particle diffusivity [m2.s-1]": 4e-15,
-        "Positive electrode OCP [V]": nmc_LGM50_ocp_Chen2020,
-        "Positive electrode porosity": 0.335,
-        "Positive electrode active material volume fraction": 0.665,
-        "Positive particle radius [m]": 5.22e-06,
+        "Positive electrode conductivity [S.m-1]": 215.0,
+        "Primary: Maximum concentration in positive electrode [mol.m-3]": 28700.0,
+        "Primary: Initial concentration in positive electrode [mol.m-3]": 27700.0,
+        "Primary: Positive particle diffusivity [m2.s-1]": 5.5e-14,
+        "Primary: Positive electrode OCP [V]": graphite_ocp_Enertech_Ai2020,
+        "Positive electrode porosity": 0.25,
+        "Primary: Positive electrode active material volume fraction": 0.735,
+        "Primary: Positive particle radius [m]": 5.86e-06,
         "Positive electrode Bruggeman coefficient (electrolyte)": 1.5,
         "Positive electrode Bruggeman coefficient (electrode)": 0,
         "Positive electrode charge transfer coefficient": 0.5,
         "Positive electrode double-layer capacity [F.m-2]": 0.2,
-        "Positive electrode exchange-current density [A.m-2]"
-        "": nmc_LGM50_electrolyte_exchange_current_density_Chen2020,
-        "Positive electrode density [kg.m-3]": 3262.0,
+        "Primary: Positive electrode exchange-current density [A.m-2]"
+        "": graphite_LGM50_electrolyte_exchange_current_density_Chen2020,
+        "Primary: Positive electrode density [kg.m-3]": 1657.0,
         "Positive electrode specific heat capacity [J.kg-1.K-1]": 700.0,
-        "Positive electrode thermal conductivity [W.m-1.K-1]": 2.1,
-        "Positive electrode OCP entropic change [V.K-1]": 0.0,
+        "Positive electrode thermal conductivity [W.m-1.K-1]": 1.7,
+        "Primary: Positive electrode OCP entropic change [V.K-1]": 0.0,
+        "Secondary: Maximum concentration in positive electrode [mol.m-3]": 278000.0,
+        "Secondary: Initial concentration in positive electrode [mol.m-3]": 276610.0,
+        "Secondary: Positive particle diffusivity [m2.s-1]": 1.67e-14,
+        "Secondary: Positive electrode lithiation OCP [V]"
+        "": silicon_ocp_lithiation_Mark2016,
+        "Secondary: Positive electrode delithiation OCP [V]"
+        "": silicon_ocp_delithiation_Mark2016,
+        "Secondary: Positive electrode active material volume fraction": 0.015,
+        "Secondary: Positive particle radius [m]": 1.52e-06,
+        "Secondary: Positive electrode exchange-current density [A.m-2]"
+        "": silicon_LGM50_electrolyte_exchange_current_density_Chen2020,
+        "Secondary: Positive electrode density [kg.m-3]": 2650.0,
+        "Secondary: Positive electrode OCP entropic change [V.K-1]": 0.0,
         # separator
         "Separator porosity": 0.47,
         "Separator Bruggeman coefficient (electrolyte)": 1.5,
@@ -463,13 +430,12 @@ def get_parameter_values():
         "Ambient temperature [K]": 298.15,
         "Number of electrodes connected in parallel to make a cell": 1.0,
         "Number of cells connected in series to make a battery": 1.0,
-        "Lower voltage cut-off [V]": 2.5,
-        "Upper voltage cut-off [V]": 4.2,
-        "Open-circuit voltage at 0% SOC [V]": 2.5,
-        "Open-circuit voltage at 100% SOC [V]": 4.2,
-        "Initial concentration in negative electrode [mol.m-3]": 29866.0,
-        "Initial concentration in positive electrode [mol.m-3]": 17038.0,
+        "Lower voltage cut-off [V]": 0.005,
+        "Upper voltage cut-off [V]": 1.5,
+        "Open-circuit voltage at 0% SOC [V]": 0.005,
+        "Open-circuit voltage at 100% SOC [V]": 1.5,
+        "Initial concentration in positive electrode [mol.m-3]": 29866.0,
         "Initial temperature [K]": 298.15,
         # citations
-        "citations": ["Chen2020", "Ai2022"],
+        "citations": ["Chen2020", "Ai2022", "Xu2019"],
     }
