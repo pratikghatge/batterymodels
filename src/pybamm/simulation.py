@@ -175,6 +175,11 @@ class Simulation:
             )
 
     def set_up_and_parameterise_experiment(self, solve_kwargs=None):
+        msg = "pybamm.simulation.set_up_and_parameterise_experiment is deprecated and not meant to be accessed by users."
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        self._set_up_and_parameterise_experiment(solve_kwargs=solve_kwargs)
+
+    def _set_up_and_parameterise_experiment(self, solve_kwargs=None):
         """
         Create and parameterise the models for each step in the experiment.
 
@@ -253,10 +258,16 @@ class Simulation:
             )
 
     def set_parameters(self):
+        msg = (
+            "pybamm.set_paramters is deprecated and not meant to be accessed by users."
+        )
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        self._set_parameters()
+
+    def _set_parameters(self):
         """
         A method to set the parameters in the model and the associated geometry.
         """
-
         if self._model_with_set_params:
             return
 
