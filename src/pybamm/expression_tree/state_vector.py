@@ -1,8 +1,10 @@
+import numpy as np
+import numpy.typing as npt
+
 #
 # State Vector class
 #
 from __future__ import annotations
-import numpy as np
 from scipy.sparse import csr_matrix, vstack
 
 import pybamm
@@ -281,8 +283,8 @@ class StateVector(StateVectorBase):
     def _base_evaluate(
         self,
         t: float | None = None,
-        y: np.ndarray | None = None,
-        y_dot: np.ndarray | None = None,
+        y: npt.NDArray | None = None,
+        y_dot: npt.NDArray | None = None,
         inputs: dict | str | None = None,
     ):
         """See :meth:`pybamm.Symbol._base_evaluate()`."""
@@ -294,7 +296,7 @@ class StateVector(StateVectorBase):
             )
 
         out = (y[: len(self._evaluation_array)])[self._evaluation_array]
-        if isinstance(out, np.ndarray) and out.ndim == 1:
+        if isinstance(out, npt.NDArray) and out.ndim == 1:
             out = out[:, np.newaxis]
         return out
 
@@ -365,8 +367,8 @@ class StateVectorDot(StateVectorBase):
     def _base_evaluate(
         self,
         t: float | None = None,
-        y: np.ndarray | None = None,
-        y_dot: np.ndarray | None = None,
+        y: npt.NDArray | None = None,
+        y_dot: npt.NDArray | None = None,
         inputs: dict | str | None = None,
     ):
         """See :meth:`pybamm.Symbol._base_evaluate()`."""
@@ -378,7 +380,7 @@ class StateVectorDot(StateVectorBase):
             )
 
         out = (y_dot[: len(self._evaluation_array)])[self._evaluation_array]
-        if isinstance(out, np.ndarray) and out.ndim == 1:
+        if isinstance(out, npt.NDArray) and out.ndim == 1:
             out = out[:, np.newaxis]
         return out
 

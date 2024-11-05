@@ -1,8 +1,10 @@
+import numpy as np
+import numpy.typing as npt
+
 #
 # Interface for discretisation
 #
 import pybamm
-import numpy as np
 from collections import defaultdict, OrderedDict
 from scipy.sparse import block_diag, csc_matrix, csr_matrix
 from scipy.sparse.linalg import inv
@@ -1015,7 +1017,7 @@ class Discretisation:
         # Individual
         for var, eqn in model.initial_conditions.items():
             ic_eval = eqn.evaluate(t=0, inputs="shape test")
-            if not isinstance(ic_eval, np.ndarray):
+            if not isinstance(ic_eval, npt.NDArray):
                 raise pybamm.ModelError(
                     "initial conditions must be numpy array after discretisation but "
                     f"they are {type(ic_eval)} for variable '{var}'."

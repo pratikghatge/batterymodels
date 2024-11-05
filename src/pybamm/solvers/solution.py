@@ -1,3 +1,6 @@
+import numpy as np
+import numpy.typing as npt
+
 #
 # Solution class
 #
@@ -5,7 +8,6 @@ import casadi
 import copy
 import json
 import numbers
-import numpy as np
 import pickle
 import pybamm
 import pandas as pd
@@ -21,7 +23,7 @@ class NumpyEncoder(json.JSONEncoder):
     """
 
     def default(self, obj):
-        if isinstance(obj, np.ndarray):
+        if isinstance(obj, npt.NDArray):
             return obj.tolist()
         # won't be called since we only need to convert numpy arrays
         return json.JSONEncoder.default(self, obj)  # pragma: no cover
