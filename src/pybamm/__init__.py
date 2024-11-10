@@ -199,15 +199,15 @@ from . import callbacks
 # Pybamm Data manager using pooch
 from .pybamm_data import DataLoader
 
+# Pybamm entry point API for parameter_sets and models
+from .dispatch.entry_points import Model, parameter_sets
+
 # Fix Casadi import
 import os
 import pathlib
 import sysconfig
 
 os.environ["CASADIPATH"] = str(pathlib.Path(sysconfig.get_path("purelib")) / "casadi")
-
-# Pybamm entry point API for parameter_sets and models
-from .entry_points import parameter_sets, Model, model_sets
 
 __all__ = [
     "batch_study",
@@ -232,4 +232,5 @@ __all__ = [
     "util",
     "version",
     "pybamm_data",
+    "dispatch",
 ]
