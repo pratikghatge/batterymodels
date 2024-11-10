@@ -8,7 +8,6 @@ from typing import Callable
 
 class EntryPoint(Mapping):
     """
-    Dict-like interface for accessing parameter sets and models through entry points in copier template.
     Access via :py:data:`pybamm.parameter_sets` for parameter_sets
     Access via :py:data:`pybamm.Model` for Models
 
@@ -17,7 +16,7 @@ class EntryPoint(Mapping):
     Listing available parameter sets:
         >>> import pybamm
         >>> list(pybamm.parameter_sets)
-        ['Ai2020', 'Chen2020', ...]
+        ['Ai2020', 'Chayambuka2022', ...]
         >>> list(pybamm.dispatch.models)
         ['SPM']
 
@@ -27,7 +26,7 @@ class EntryPoint(Mapping):
         >>> print(pybamm.parameter_sets.get_docstring("Ai2020"))
         <BLANKLINE>
         Parameters for the Enertech cell (Ai2020), from the papers :footcite:t:`Ai2019`,
-        :footcite:t:`rieger2016new` and references therein.
+        :footcite:t:`Rieger2016` and references therein.
         ...
 
         See also: :ref:`adding-parameter-sets`
