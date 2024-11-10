@@ -200,7 +200,7 @@ from . import callbacks
 from .pybamm_data import DataLoader
 
 # Pybamm entry point API for parameter_sets and models
-from .dispatch.entry_points import Model, parameter_sets
+from .dispatch import parameter_sets, Model
 
 # Fix Casadi import
 import os

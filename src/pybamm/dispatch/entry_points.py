@@ -18,7 +18,7 @@ class EntryPoint(Mapping):
         >>> import pybamm
         >>> list(pybamm.parameter_sets)
         ['Ai2020', 'Chen2020', ...]
-        >>> list(pybamm.models)
+        >>> list(pybamm.dispatch.models)
         ['SPM']
 
     Get the docstring for a parameter set/model:
@@ -32,7 +32,7 @@ class EntryPoint(Mapping):
 
         See also: :ref:`adding-parameter-sets`
 
-        >>> print(pybamm.models.get_docstring("SPM"))
+        >>> print(pybamm.dispatch.models.get_docstring("SPM"))
         <BLANKLINE>
         Single Particle Model (SPM) of a lithium-ion battery, from
         :footcite:t:`Marquis2019`.
@@ -136,7 +136,7 @@ def Model(model: str):  # doctest: +SKIP
     --------
     Listing available models:
         >>> import pybamm
-        >>> list(pybamm.models)
+        >>> list(pybamm.dispatch.models)
         ['SPM']
         >>> pybamm.Model('SPM') # doctest: +SKIP
         <pybamm.models.full_battery_models.lithium_ion.spm.SPM object>
